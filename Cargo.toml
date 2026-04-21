@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+crossterm = "0.28"
+image = { version = "0.25", default-features = true, features = ["png", "jpeg", "gif", "bmp", "webp"] }
+ratatui = "0.29"
 tellus_level = { path = "../tellus_level" }

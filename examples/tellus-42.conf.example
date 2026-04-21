@@ -1,0 +1,29 @@
+# Tellus 42 example configuration
+# Copy to ~/.tellus-42.conf and adjust paths/colors to taste.
+
+# Layer image folders loaded on startup.
+ground_images=~/art/tellus/ground
+detail_images=~/art/tellus/detail
+logic_images=~/art/tellus/logic
+
+# Layout tuning.
+sidebar_width=40
+tile_gap_x=1
+tile_gap_y=1
+
+# Theme colors in #RRGGBB.
+sidebar_bg=#181b20
+panel_border=#6a717b
+panel_text=#d9dde4
+muted_text=#8d95a0
+accent_text=#a7c8ff
+success_text=#93cba4
+warning_text=#dfc679
+error_text=#e36f6f
+grid_bg=#dadada
+tile_bg=#000000
+
+# Cursor colors for each mode.
+cursor_normal=#4a72b5
+cursor_insert=#5f9b69
+cursor_command=#b18a45
