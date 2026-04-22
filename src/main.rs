@@ -88,6 +88,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
         Mode::Command => handle_command_key(app, key),
         Mode::Insert => handle_insert_key(app, key),
         Mode::Normal => handle_normal_key(app, key),
+        Mode::Visual => handle_visual_key(app, key),
     };
 
     match result {
@@ -104,6 +105,8 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
     match key.code {
         KeyCode::Char(':') => app.begin_command(),
         KeyCode::Char('i') => app.enter_insert_mode(),
+        KeyCode::Char('v') => app.enter_visual_mode(),
+        KeyCode::Char('p') if !key.modifiers.contains(KeyModifiers::CONTROL) => app.paste_yanked()?,
         KeyCode::Char('u') if !key.modifiers.contains(KeyModifiers::CONTROL) => app.undo()?,
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => app.redo()?,
         KeyCode::Char('h') | KeyCode::Left => app.move_cursor(-1, 0, viewport_tiles),
@@ -128,9 +131,30 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
         KeyCode::Char('j') | KeyCode::Down => app.move_cursor(0, 1, viewport_tiles),
         KeyCode::Char('k') | KeyCode::Up => app.move_cursor(0, -1, viewport_tiles),
         KeyCode::Char('l') | KeyCode::Right => app.move_cursor(1, 0, viewport_tiles),
-        KeyCode::Char(ch) if ('1'..='9').contains(&ch) => {
+        KeyCode::Char(ch) if ch.is_ascii_digit() => {
             app.paint_digit(ch.to_digit(10).unwrap_or_default() as u16)?;
         }
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_visual_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
+    let viewport_tiles = viewport_tiles(app);
+    match key.code {
+        KeyCode::Esc => app.enter_normal_mode(),
+        KeyCode::Char('v') => app.toggle_visual_mode(),
+        KeyCode::Char('y') if !key.modifiers.contains(KeyModifiers::CONTROL) => app.yank_selection()?,
+        KeyCode::Char('p') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.paste_yanked_over_selection()?
+        }
+        KeyCode::Char(ch) if ch.is_ascii_digit() => {
+            app.paint_selection(ch.to_digit(10).unwrap_or_default() as u16)?
+        }
+        KeyCode::Char('h') | KeyCode::Left => app.move_cursor(-1, 0, viewport_tiles),
+        KeyCode::Char('j') | KeyCode::Down => app.move_cursor(0, 1, viewport_tiles),
+        KeyCode::Char('k') | KeyCode::Up => app.move_cursor(0, -1, viewport_tiles),
+        KeyCode::Char('l') | KeyCode::Right => app.move_cursor(1, 0, viewport_tiles),
         _ => {}
     }
     Ok(false)
@@ -157,8 +181,9 @@ fn handle_command_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
 
 fn viewport_tiles(app: &App) -> (u16, u16) {
     let (term_w, term_h) = size().unwrap_or((120, 40));
-    let width = term_w.saturating_sub(app.sidebar_width() + 2);
-    let height = term_h.saturating_sub(app::COMMAND_HEIGHT + 2);
+    let width = term_w.saturating_sub(app.sidebar_width() + 2 + ui::ROW_NUMBER_GUTTER_WIDTH);
+    let height =
+        term_h.saturating_sub(app::COMMAND_HEIGHT + 2 + ui::COLUMN_NUMBER_GUTTER_HEIGHT);
     let (tile_w, tile_h) = app.tile_size();
     ((width / tile_w.max(1)).max(1), (height / tile_h.max(1)).max(1))
 }

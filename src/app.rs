@@ -19,6 +19,7 @@ use crate::config::{AppConfig, UiTheme};
 pub enum Mode {
     Normal,
     Insert,
+    Visual,
     Command,
 }
 
@@ -34,6 +35,20 @@ struct EditSnapshot {
     dirty: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct YankBuffer {
+    width: u16,
+    height: u16,
+}
+
 #[derive(Debug, Clone)]
 pub struct App {
     level: Level,
@@ -46,11 +61,14 @@ pub struct App {
     view_y: u16,
     zoom: u8,
     mode: Mode,
+    visual_anchor: Option<(u16, u16)>,
     status: String,
     command_buffer: String,
     config: AppConfig,
     undo_stack: Vec<EditSnapshot>,
     redo_stack: Vec<EditSnapshot>,
+    yank_buffer: Option<YankBuffer>,
+    yanked_tiles: Vec<u16>,
     layers: [LayerAssets; 3],
 }
 
@@ -80,11 +98,14 @@ impl App {
             view_y: 0,
             zoom: 2,
             mode: Mode::Normal,
+            visual_anchor: None,
             status: "Normal mode".to_string(),
             command_buffer: String::new(),
             config: AppConfig::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            yank_buffer: None,
+            yanked_tiles: Vec::new(),
             layers: std::array::from_fn(|_| LayerAssets::default()),
         }
     }
@@ -192,23 +213,34 @@ impl App {
 
     pub fn begin_command(&mut self) {
         self.mode = Mode::Command;
+        self.visual_anchor = None;
         self.command_buffer.clear();
         self.status = "Command mode".to_string();
     }
 
     pub fn cancel_command(&mut self) {
         self.mode = Mode::Normal;
+        self.visual_anchor = None;
         self.command_buffer.clear();
         self.status = "Normal mode".to_string();
     }
 
     pub fn enter_insert_mode(&mut self) {
         self.mode = Mode::Insert;
-        self.status = "Insert mode: press 1-9 to paint, Esc to stop".to_string();
+        self.visual_anchor = None;
+        self.status = "Insert mode: press 0-9 to paint, Esc to stop".to_string();
+    }
+
+    pub fn enter_visual_mode(&mut self) {
+        self.mode = Mode::Visual;
+        self.visual_anchor = Some((self.cursor_x, self.cursor_y));
+        self.status = "Visual mode: move to select, 0-9 paint, y yank, p paste, Esc to stop"
+            .to_string();
     }
 
     pub fn enter_normal_mode(&mut self) {
         self.mode = Mode::Normal;
+        self.visual_anchor = None;
         self.status = "Normal mode".to_string();
     }
 
@@ -261,6 +293,14 @@ impl App {
         self.status = format!("Zoom {}", self.zoom);
     }
 
+    pub fn toggle_visual_mode(&mut self) {
+        if self.mode == Mode::Visual {
+            self.enter_normal_mode();
+        } else {
+            self.enter_visual_mode();
+        }
+    }
+
     pub fn paint_digit(&mut self, digit: u16) -> Result<(), String> {
         validate_tile_id(digit, "paint")?;
         self.record_undo_state();
@@ -290,6 +330,42 @@ impl App {
                 layer_name(self.active_layer)
             )
         };
+        Ok(())
+    }
+
+    pub fn paint_selection(&mut self, digit: u16) -> Result<(), String> {
+        validate_tile_id(digit, "paint")?;
+        let Some(selection) = self.visual_selection() else {
+            return self.paint_digit(digit);
+        };
+
+        self.record_undo_state();
+        self.apply_tile_rect(selection, digit)?;
+
+        self.dirty = true;
+        let mapped = self
+            .layer_assets(self.active_layer)
+            .tiles
+            .iter()
+            .any(|tile| tile.id == digit);
+        self.status = if mapped {
+            format!(
+                "Painted {} over {}x{} selection on {}",
+                digit,
+                selection.width,
+                selection.height,
+                layer_name(self.active_layer)
+            )
+        } else {
+            format!(
+                "Painted {} over {}x{} selection on {} (unmapped, showing numeric fallback)",
+                digit,
+                selection.width,
+                selection.height,
+                layer_name(self.active_layer)
+            )
+        };
+        self.enter_normal_mode_preserving_status();
         Ok(())
     }
 
@@ -347,6 +423,20 @@ impl App {
 
     pub fn visible_tile_id(&self, x: u16, y: u16) -> Option<u16> {
         self.level.tile(self.active_layer, x, y).ok()
+    }
+
+    pub fn visual_selection(&self) -> Option<SelectionRect> {
+        let (anchor_x, anchor_y) = self.visual_anchor?;
+        Some(selection_rect(
+            (anchor_x, anchor_y),
+            (self.cursor_x, self.cursor_y),
+        ))
+    }
+
+    pub fn is_selected(&self, x: u16, y: u16) -> bool {
+        self.visual_selection()
+            .map(|selection| selection_contains(selection, x, y))
+            .unwrap_or(false)
     }
 
     pub fn tile_texture(&self, layer: LayerKind, id: u16) -> Option<&TileTexture> {
@@ -414,6 +504,58 @@ impl App {
     fn record_undo_state(&mut self) {
         self.undo_stack.push(self.snapshot());
         self.redo_stack.clear();
+    }
+
+    pub fn yank_selection(&mut self) -> Result<(), String> {
+        let Some(selection) = self.visual_selection() else {
+            return Err("visual selection required for yank".to_string());
+        };
+
+        let mut tiles = Vec::with_capacity(selection_area(selection));
+        for y in selection.y..selection.y.saturating_add(selection.height) {
+            for x in selection.x..selection.x.saturating_add(selection.width) {
+                tiles.push(
+                    self.level
+                        .tile(self.active_layer, x, y)
+                        .map_err(|err| err.to_string())?,
+                );
+            }
+        }
+
+        self.yank_buffer = Some(YankBuffer {
+            width: selection.width,
+            height: selection.height,
+        });
+        self.yanked_tiles = tiles;
+        self.status = format!(
+            "Yanked {}x{} selection from {}",
+            selection.width,
+            selection.height,
+            layer_name(self.active_layer)
+        );
+        self.enter_normal_mode_preserving_status();
+        Ok(())
+    }
+
+    pub fn paste_yanked(&mut self) -> Result<(), String> {
+        self.paste_yanked_at(self.cursor_x, self.cursor_y)
+    }
+
+    pub fn paste_yanked_over_selection(&mut self) -> Result<(), String> {
+        let Some(selection) = self.visual_selection() else {
+            return self.paste_yanked();
+        };
+        self.paste_yanked_at(selection.x, selection.y)?;
+        self.enter_normal_mode();
+        self.status = format!(
+            "Pasted {}x{} block at ({}, {}) on {}",
+            self.yank_buffer.map(|buffer| buffer.width).unwrap_or(0),
+            self.yank_buffer.map(|buffer| buffer.height).unwrap_or(0),
+            selection.x,
+            selection.y,
+            layer_name(self.active_layer)
+        );
+        Ok(())
     }
 
     fn run_command(&mut self, input: &str) -> Result<CommandAction, String> {
@@ -540,6 +682,65 @@ impl App {
         );
         Ok(())
     }
+
+    fn paste_yanked_at(&mut self, start_x: u16, start_y: u16) -> Result<(), String> {
+        let Some(buffer) = self.yank_buffer else {
+            return Err("nothing yanked".to_string());
+        };
+
+        self.record_undo_state();
+
+        for row in 0..buffer.height {
+            let target_y = start_y.saturating_add(row);
+            if target_y >= self.level.height {
+                break;
+            }
+
+            for col in 0..buffer.width {
+                let target_x = start_x.saturating_add(col);
+                if target_x >= self.level.width {
+                    break;
+                }
+
+                let source_index = usize::from(row) * usize::from(buffer.width) + usize::from(col);
+                let tile = self
+                    .yanked_tiles
+                    .get(source_index)
+                    .copied()
+                    .ok_or_else(|| "yank buffer is corrupt".to_string())?;
+                self.level
+                    .set_tile(self.active_layer, target_x, target_y, tile)
+                    .map_err(|err| err.to_string())?;
+            }
+        }
+
+        self.dirty = true;
+        self.status = format!(
+            "Pasted {}x{} block at ({}, {}) on {}",
+            buffer.width,
+            buffer.height,
+            start_x,
+            start_y,
+            layer_name(self.active_layer)
+        );
+        Ok(())
+    }
+
+    fn apply_tile_rect(&mut self, selection: SelectionRect, tile: u16) -> Result<(), String> {
+        for y in selection.y..selection.y.saturating_add(selection.height) {
+            for x in selection.x..selection.x.saturating_add(selection.width) {
+                self.level
+                    .set_tile(self.active_layer, x, y, tile)
+                    .map_err(|err| err.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn enter_normal_mode_preserving_status(&mut self) {
+        self.mode = Mode::Normal;
+        self.visual_anchor = None;
+    }
 }
 
 impl Default for LayerAssets {
@@ -634,6 +835,30 @@ fn clamp_u16(value: u16, delta: i16, max_value: u16) -> u16 {
     } else {
         value.saturating_sub(delta.unsigned_abs()).min(max_value)
     }
+}
+
+fn selection_rect(start: (u16, u16), end: (u16, u16)) -> SelectionRect {
+    let min_x = start.0.min(end.0);
+    let min_y = start.1.min(end.1);
+    let max_x = start.0.max(end.0);
+    let max_y = start.1.max(end.1);
+    SelectionRect {
+        x: min_x,
+        y: min_y,
+        width: max_x.saturating_sub(min_x).saturating_add(1),
+        height: max_y.saturating_sub(min_y).saturating_add(1),
+    }
+}
+
+fn selection_contains(selection: SelectionRect, x: u16, y: u16) -> bool {
+    x >= selection.x
+        && y >= selection.y
+        && x < selection.x.saturating_add(selection.width)
+        && y < selection.y.saturating_add(selection.height)
+}
+
+fn selection_area(selection: SelectionRect) -> usize {
+    usize::from(selection.width) * usize::from(selection.height)
 }
 
 fn is_supported_image(path: &Path) -> bool {
@@ -813,6 +1038,63 @@ mod tests {
         app.paint_digit(2).unwrap();
         assert_eq!(app.redo_len(), 0);
         assert_eq!(app.visible_tile_id(0, 0), Some(2));
+    }
+
+    #[test]
+    fn visual_selection_paints_rectangle() {
+        let mut app = App::blank(4, 4, None).unwrap();
+        app.enter_visual_mode();
+        app.move_cursor(1, 1, (4, 4));
+        app.paint_selection(8).unwrap();
+
+        for y in 0..2 {
+            for x in 0..2 {
+                assert_eq!(app.visible_tile_id(x, y), Some(8));
+            }
+        }
+        assert_eq!(app.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn yanking_and_pasting_visual_selection_copies_rectangle() {
+        let mut app = App::blank(5, 5, None).unwrap();
+        app.paint_digit(1).unwrap();
+        app.move_cursor(1, 0, (5, 5));
+        app.paint_digit(2).unwrap();
+        app.move_cursor(-1, 1, (5, 5));
+        app.paint_digit(3).unwrap();
+        app.move_cursor(1, 0, (5, 5));
+        app.paint_digit(4).unwrap();
+
+        app.move_cursor(-1, -1, (5, 5));
+        app.enter_visual_mode();
+        app.move_cursor(1, 1, (5, 5));
+        app.yank_selection().unwrap();
+
+        app.move_cursor(1, 1, (5, 5));
+        app.paste_yanked().unwrap();
+
+        assert_eq!(app.visible_tile_id(2, 2), Some(1));
+        assert_eq!(app.visible_tile_id(3, 2), Some(2));
+        assert_eq!(app.visible_tile_id(2, 3), Some(3));
+        assert_eq!(app.visible_tile_id(3, 3), Some(4));
+    }
+
+    #[test]
+    fn visual_paste_uses_selection_origin() {
+        let mut app = App::blank(6, 6, None).unwrap();
+        app.paint_digit(5).unwrap();
+
+        app.enter_visual_mode();
+        app.move_cursor(0, 0, (6, 6));
+        app.yank_selection().unwrap();
+
+        app.move_cursor(2, 2, (6, 6));
+        app.enter_visual_mode();
+        app.move_cursor(1, 1, (6, 6));
+        app.paste_yanked_over_selection().unwrap();
+
+        assert_eq!(app.visible_tile_id(2, 2), Some(5));
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

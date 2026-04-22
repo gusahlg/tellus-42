@@ -5,7 +5,7 @@ Current scope:
 - Starts with either a blank `32x18` level or an existing `.tlvl` file path.
 - Runs as a full-screen `ratatui` + `crossterm` application.
 - Has a left sidebar for editor state, a canvas on the right, and a bottom command bar.
-- Supports cursor movement, layer switching, zoom, insert mode, and file commands.
+- Supports cursor movement, layer switching, zoom, normal/insert/visual modes, yank/paste, and file commands.
 - Can map a folder of images to one layer and use the first 9 images as paintable tile IDs.
 - Expands `~` in command paths and startup paths.
 - Falls back to numeric tile display when a painted tile ID has no mapped image.
@@ -19,6 +19,8 @@ Normal mode:
 h j k l / arrows    move cursor
 J / K               switch active layer
 i                   enter insert mode
+v                   enter visual mode
+p                   paste yanked tiles at cursor
 u                   undo last edit
 Ctrl-r              redo last undone edit
 + / -               zoom
@@ -26,8 +28,15 @@ Ctrl-r              redo last undone edit
 
 Insert mode:
 h j k l / arrows    move cursor
-1-9                 paint tile ID, with numeric fallback if unmapped
+0-9                 paint tile ID, with numeric fallback if unmapped
 Esc                 leave insert mode
+
+Visual mode:
+h j k l / arrows    expand or shrink rectangular selection
+0-9                 paint the selected area with a tile ID
+y                   yank the selected area
+p                   paste yanked tiles at the selection origin
+v / Esc             leave visual mode
 
 Command bar:
 :w [path]
@@ -60,6 +69,8 @@ Current mapping behavior:
 Current editing behavior:
 - Unmapped tile IDs render as numbers inside the grid.
 - `:fill <0-9>` fills the active layer with one tile ID.
+- Visual mode uses an inclusive rectangular selection anchored where `v` was pressed.
+- Yank and paste operate on rectangular blocks, clipped to the level bounds when pasted near edges.
 
 Configuration:
 - The editor looks for `~/.tellus-42.conf` on startup.
